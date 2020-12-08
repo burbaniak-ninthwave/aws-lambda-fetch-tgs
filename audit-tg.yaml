@@ -35,13 +35,16 @@ Resources:
         ZipFile: |
           import boto3
           import csv
+          import os.path
           from datetime import date
           
           client = boto3.client('elbv2')
           s3_resource = boto3.resource('s3')
-          
+
           bucket_name = "devops-config-backups"
-          filename = '/tmp/result-' + str(date.today()) + '.csv'
+          tmp_path = '/tmp/'
+          filename = 'result-' + str(date.today()) + '.csv'
+          full_file_path = os.path.join(tmp_path, filename)
           
           
           def get_target_groups_data() -> list:
@@ -97,8 +100,8 @@ Resources:
               return result_list
           
           
-          def save_to_csv(data, filename):
-              with open(filename, 'w', encoding='utf8', newline='') as output_file:
+          def save_to_csv(data, full_file_path):
+              with open(full_file_path, 'w', encoding='utf8', newline='') as output_file:
                   fc = csv.DictWriter(output_file,
                                       fieldnames=data[0].keys(),
           
@@ -108,7 +111,7 @@ Resources:
           
           def save_to_bucket(bucket_name, filename):
               s3_resource.meta.client.upload_file(
-                  Filename=filename, Bucket=bucket_name,
+                  Filename=full_file_path, Bucket=bucket_name,
                   Key=filename)
           
           def create_bucket(bucket_name):
@@ -117,7 +120,7 @@ Resources:
           def run(arg1=0,arg2=0):
               tg_data = get_target_groups_data()
               tg_data_with_ids = fill_instances_ids(tg_data)
-              save_to_csv(tg_data_with_ids, filename)
+              save_to_csv(tg_data_with_ids, full_file_path)
           #    create_bucket(bucket_name)
               save_to_bucket(bucket_name, filename)
 
