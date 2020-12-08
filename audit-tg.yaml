@@ -1,0 +1,138 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: "AWS Lambda function for audit ALB Target Groups"
+Resources:
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      AccessControl: PublicRead
+      BucketName: devops-config-backups
+      VersioningConfiguration:
+        Status: Enabled
+  AuditTGExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: [lambda.amazonaws.com]
+            Action: ['sts:AssumeRole']
+      Path: /
+      Policies:
+        - PolicyName: AuditTargetGroupsAdminAccess
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: '*'
+                Resource: '*'
+      
+  AuditTGFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        ZipFile: |
+          import boto3
+          import csv
+          from datetime import date
+          
+          client = boto3.client('elbv2')
+          s3_resource = boto3.resource('s3')
+          
+          bucket_name = "devops-config-backups"
+          filename = '/tmp/result-' + str(date.today()) + '.csv'
+          
+          
+          def get_target_groups_data() -> list:
+              target_group_data = list()
+              response = client.describe_target_groups()
+              if response['ResponseMetadata']['HTTPStatusCode'] == 200:
+                  for tg in response['TargetGroups']:
+                      target_group_data.append({'TargetGroupName': tg['TargetGroupName'],
+                                                'TargetGroupArn': tg['TargetGroupArn'],
+                                                'LoadBalancerArnsList': tg['LoadBalancerArns'],
+                                                'Port': tg['Port']})
+                  if response.get('NextMarker'):
+                      current_marker = response['NextMarker']
+                      while True:
+                          response_with_marker = client.describe_target_groups(Marker=current_marker)
+                          if response_with_marker['ResponseMetadata']['HTTPStatusCode'] == 200:
+                              for tg in response_with_marker['TargetGroups']:
+                                  target_group_data.append({'TargetGroupName': tg['TargetGroupName'],
+                                                            'TargetGroupArn': tg['TargetGroupArn'],
+                                                            'LoadBalancerArnsList': tg['LoadBalancerArns'],
+                                                            'Port': tg['Port']})
+                              current_marker = response_with_marker.get('NextMarker')
+                              if current_marker:
+                                  pass
+                              else:
+                                  break 
+                          else:
+                              print(f"Additional request with next results marker failed"
+                                    f" with code:{response['ResponseMetadata']['HTTPStatusCode']}")
+                              break
+                      return target_group_data
+                  else:
+                      return target_group_data
+              else:
+                  print(f"Request to describe_target_groups failed "
+                        f"with code:{response['ResponseMetadata']['HTTPStatusCode']}")
+
+          def fill_instances_ids(target_group_data: list) -> list:
+              result_list = []
+              for tg_dict in target_group_data:
+                  response = client.describe_target_health(TargetGroupArn=tg_dict['TargetGroupArn'])
+                  if response['ResponseMetadata']['HTTPStatusCode'] == 200:
+                      for target in response['TargetHealthDescriptions']:
+                          result_list.append({'TargetGroupName': tg_dict['TargetGroupName'],
+                                              'TargetGroupArn': tg_dict['TargetGroupArn'],
+                                              'LoadBalancerArnsList': tg_dict['LoadBalancerArnsList'],
+                                              'Port': tg_dict['Port'],
+                                              'InstanceId': target['Target']['Id'],
+                                              'TargetPort': target['Target']['Port']})
+                  else:
+                      print(f"Request to describe_target_health failed "
+                            f"with code:{response['ResponseMetadata']['HTTPStatusCode']}")
+              return result_list
+          
+          
+          def save_to_csv(data, filename):
+              with open(filename, 'w', encoding='utf8', newline='') as output_file:
+                  fc = csv.DictWriter(output_file,
+                                      fieldnames=data[0].keys(),
+          
+                                      )
+                  fc.writeheader()
+                  fc.writerows(data)
+          
+          def save_to_bucket(bucket_name, filename):
+              s3_resource.meta.client.upload_file(
+                  Filename=filename, Bucket=bucket_name,
+                  Key=filename)
+          
+          def create_bucket(bucket_name):
+              s3_resource.create_bucket(Bucket=bucket_name)
+          
+          def run(arg1=0,arg2=0):
+              tg_data = get_target_groups_data()
+              tg_data_with_ids = fill_instances_ids(tg_data)
+              save_to_csv(tg_data_with_ids, filename)
+          #    create_bucket(bucket_name)
+              save_to_bucket(bucket_name, filename)
+
+      Handler: index.run
+      Runtime: python3.7
+      Role: !GetAtt AuditTGExecutionRole.Arn
+  AuditTGFunctionPermissions:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: 'lambda:InvokeFunction'
+      FunctionName: !GetAtt AuditTGFunction.Arn
+      Principal: 'cloudformation.amazonaws.com'
+  AuditTG:
+    Type: AWS::CloudFormation::Macro
+    Properties:
+      Name: !Sub 'AuditTG'
+      Description: Processes inline python in templates
+      FunctionName: !GetAtt AuditTGFunction.Arn
