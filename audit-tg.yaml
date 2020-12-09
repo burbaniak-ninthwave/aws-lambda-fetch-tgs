@@ -1,32 +1,61 @@
 AWSTemplateFormatVersion: 2010-09-09
 Description: "AWS Lambda function for audit ALB Target Groups"
+Parameters:
+  Prefix:
+    Description: 'Prefix to distinguish all names as part of this app'
+    AllowedPattern: '^[a-z\-0-9]*$'
+    Type: 'String'
+    Default: 'devops'
+  Environment:
+    Description: 'Environment belonging to the scope'
+    AllowedPattern: '^[a-z\-0-9]*$'
+    Type: 'String'
+    Default: 'dev'
 Resources:
-  S3Bucket:
-    Type: AWS::S3::Bucket
+  AuditTGS3Bucket:
+    Type: 'AWS::S3::Bucket'
     Properties:
-      AccessControl: PublicRead
-      BucketName: devops-config-backups
-      VersioningConfiguration:
-        Status: Enabled
+      BucketName: !Sub '${Prefix}-${Environment}-backups'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+        - ServerSideEncryptionByDefault:
+            SSEAlgorithm: AES256
+    DeletionPolicy: 'Retain'
   AuditTGExecutionRole:
     Type: AWS::IAM::Role
     Properties:
+      Description: Role for Lambda 
+      RoleName: !Sub "${Prefix}-${Environment}-role"
+      Path: '/'
       AssumeRolePolicyDocument:
         Version: 2012-10-17
         Statement:
-          - Effect: Allow
-            Principal:
-              Service: [lambda.amazonaws.com]
-            Action: ['sts:AssumeRole']
-      Path: /
+         - Effect: Allow
+           Principal:
+             Service:
+              - lambda.amazonaws.com
+           Action:
+            - 'sts:AssumeRole'
       Policies:
-        - PolicyName: AuditTargetGroupsAdminAccess
+        - PolicyName: lambda_execution_policy
           PolicyDocument:
-            Version: 2012-10-17
+            Version: '2012-10-17'
             Statement:
               - Effect: Allow
-                Action: '*'
+                Action:
+                  - 's3:PutObject*'
+                  - 's3:ListBucket*'
+                Resource:
+                  - !Sub ${AuditTGS3Bucket.Arn}/*
+              - Effect: Allow
+                Action:
+                  - 'elasticloadbalancing:Describe*'
                 Resource: '*'
+              - Effect: Allow
+                Action:
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource: !Sub arn:aws:logs:*:*:log-group:/aws/lambda/${AWS::StackName}*:*
       
   AuditTGFunction:
     Type: AWS::Lambda::Function
@@ -41,7 +70,7 @@ Resources:
           client = boto3.client('elbv2')
           s3_resource = boto3.resource('s3')
 
-          bucket_name = "devops-config-backups"
+          bucket_name = "devops-dev-backups"
           tmp_path = '/tmp/'
           filename = 'result-' + str(date.today()) + '.csv'
           full_file_path = os.path.join(tmp_path, filename)
@@ -98,13 +127,11 @@ Resources:
                       print(f"Request to describe_target_health failed "
                             f"with code:{response['ResponseMetadata']['HTTPStatusCode']}")
               return result_list
-          
-          
+
           def save_to_csv(data, full_file_path):
               with open(full_file_path, 'w', encoding='utf8', newline='') as output_file:
                   fc = csv.DictWriter(output_file,
                                       fieldnames=data[0].keys(),
-          
                                       )
                   fc.writeheader()
                   fc.writerows(data)
@@ -123,19 +150,42 @@ Resources:
               save_to_csv(tg_data_with_ids, full_file_path)
           #    create_bucket(bucket_name)
               save_to_bucket(bucket_name, filename)
-
       Handler: index.run
       Runtime: python3.7
       Role: !GetAtt AuditTGExecutionRole.Arn
-  AuditTGFunctionPermissions:
+  AuditTGScheduledRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Scheduled Rule
+      ScheduleExpression: cron(0 7 ? * * *)
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt AuditTGFunction.Arn
+          Id: TargetFunctionV1
+  AuditTGFunctionPermissionsCF:
     Type: AWS::Lambda::Permission
     Properties:
       Action: 'lambda:InvokeFunction'
       FunctionName: !GetAtt AuditTGFunction.Arn
-      Principal: 'cloudformation.amazonaws.com'
+      Principal: cloudformation.amazonaws.com
+  AuditTGFunctionPermissionsEV:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: 'lambda:InvokeFunction'
+      FunctionName: !GetAtt AuditTGFunction.Arn
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt AuditTGScheduledRule.Arn
+  AuditTGFunctionLogsGroup:
+    Type: AWS::Logs::LogGroup
+    DependsOn: AuditTGFunction
+    DeletionPolicy: Delete
+    Properties:
+      LogGroupName: !Join ['/', ['/aws/lambda', !Ref AuditTGFunction]]
+      RetentionInDays: 14
   AuditTG:
     Type: AWS::CloudFormation::Macro
     Properties:
       Name: !Sub 'AuditTG'
       Description: Processes inline python in templates
       FunctionName: !GetAtt AuditTGFunction.Arn
+  
