@@ -64,13 +64,14 @@ Resources:
         ZipFile: |
           import boto3
           import csv
+          import os
           import os.path
           from datetime import date
           
           client = boto3.client('elbv2')
           s3_resource = boto3.resource('s3')
 
-          bucket_name = "devops-dev-backups"
+          bucket_name = os.environ['bucket_name']
           tmp_path = '/tmp/'
           filename = 'result-' + str(date.today()) + '.csv'
           full_file_path = os.path.join(tmp_path, filename)
@@ -152,6 +153,9 @@ Resources:
               save_to_bucket(bucket_name, filename)
       Handler: index.run
       Runtime: python3.7
+      Environment:
+        Variables:
+          bucket_name: !Ref AuditTGS3Bucket 
       Role: !GetAtt AuditTGExecutionRole.Arn
   AuditTGScheduledRule:
     Type: AWS::Events::Rule
