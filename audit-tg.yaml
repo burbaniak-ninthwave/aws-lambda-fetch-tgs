@@ -37,7 +37,7 @@ Resources:
            Action:
             - 'sts:AssumeRole'
       Policies:
-        - PolicyName: lambda_execution_policy
+        - PolicyName: AuditTGFunctionPolicy
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
